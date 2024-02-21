@@ -381,6 +381,7 @@ func (f *factory) createMetricsExporter(
 		),
 		profiler.WithAgentlessUpload(),
 		profiler.WithAPIKey(string(cfg.API.Key)),
+		profiler.WithSite(cfg.API.Site),
 	); err != nil {
 		cancel()
 		return nil, fmt.Errorf("error creating profiler %v", err)
