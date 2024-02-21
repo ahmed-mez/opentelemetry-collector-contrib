@@ -6,7 +6,9 @@ package datadogexporter // import "github.com/open-telemetry/opentelemetry-colle
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +38,8 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/datadogexporter/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/datadog"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/resourcetotelemetry"
+
+	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
 
 var metricExportNativeClientFeatureGate = featuregate.GlobalRegistry().MustRegister(
@@ -342,6 +346,46 @@ func (f *factory) createMetricsExporter(
 		pushMetricsFn = exp.PushMetricsDataScrubbed
 	}
 
+	// Setup agentless datadog profiler
+	var service string
+	var env string
+	if v, ok := os.LookupEnv("OTEL_RESOURCE_ATTRIBUTES"); ok {
+		for _, attr := range strings.Split(v, ",") {
+			if strings.HasPrefix(attr, "service.name") {
+				service = strings.Split(attr, "=")[1]
+			}
+			if strings.HasPrefix(attr, "deployment.environment") {
+				env = strings.Split(attr, "=")[1]
+			}
+		}
+	}
+	if service == "" {
+		set.Logger.Warn("service.name not found in OTEL_RESOURCE_ATTRIBUTES")
+		service = "otel-collector"
+	}
+	if env == "" {
+		set.Logger.Warn("deployment.environment not found in OTEL_RESOURCE_ATTRIBUTES")
+		env = "experimental"
+	}
+	if err = profiler.Start(
+		profiler.WithService(service),
+		profiler.WithEnv(env),
+		profiler.WithProfileTypes(
+			profiler.CPUProfile,
+			profiler.HeapProfile,
+			// The profiles below are disabled by default to keep overhead
+			// low, but can be enabled as needed.
+			profiler.BlockProfile,
+			profiler.MutexProfile,
+			profiler.GoroutineProfile,
+		),
+		profiler.WithAgentlessUpload(),
+		profiler.WithAPIKey(string(cfg.API.Key)),
+	); err != nil {
+		cancel()
+		return nil, fmt.Errorf("error creating profiler %v", err)
+	}
+
 	exporter, err := exporterhelper.NewMetricsExporter(
 		ctx,
 		set,
@@ -364,6 +408,7 @@ func (f *factory) createMetricsExporter(
 			if statsToAgent != nil {
 				close(statsToAgent)
 			}
+			profiler.Stop()
 			return nil
 		}),
 	)
